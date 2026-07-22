@@ -1,0 +1,66 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Render static site
+        run: |
+          pnpm start >/tmp/topolab.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000/ -o /tmp/index.html; then break; fi
+            sleep 1
+          done
+          test -s /tmp/index.html
+          mkdir -p site
+          cp -R dist/client/. site/
+          cp /tmp/index.html site/index.html
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("site/index.html")
+          s = p.read_text(encoding="utf-8")
+          prefix = "/topolab-ai-topology-review"
+          s = s.replace('href="/', f'href="{prefix}/')
+          s = s.replace('src="/', f'src="{prefix}/')
+          s = s.replace('content="/og.png"', f'content="{prefix}/og.png"')
+          p.write_text(s, encoding="utf-8")
+          PY
+          touch site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
