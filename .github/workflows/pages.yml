@@ -44,8 +44,8 @@ jobs:
           p = Path("site/index.html")
           s = p.read_text(encoding="utf-8")
           prefix = "/topolab-ai-topology-review"
-          s = s.replace('href="/', f'href="{prefix}/')
-          s = s.replace('src="/', f'src="{prefix}/')
+          s = s.replace('/assets/', f'{prefix}/assets/')
+          s = s.replace('href="/favicon', f'href="{prefix}/favicon')
           s = s.replace('content="/og.png"', f'content="{prefix}/og.png"')
           p.write_text(s, encoding="utf-8")
           PY
