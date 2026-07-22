@@ -6,7 +6,20 @@ export type ViewerSource =
   | { kind: "demo"; variant: string; color: string }
   | { kind: "file"; name: string; buffer: ArrayBuffer; color: string };
 
-type ViewerStats = { triangles: number; vertices: number };
+export type ViewerStats = {
+  triangles: number;
+  vertices: number;
+  faces?: number;
+  quadRatio?: number;
+  ngonCount?: number;
+  boundaryEdges?: number;
+  nonManifoldEdges?: number;
+  degenerateFaces?: number;
+  isolatedVertices?: number;
+  poleRatio?: number;
+  uvCoverage?: number;
+  normalCoverage?: number;
+};
 type Geometry = { positions: Float32Array; normals: Float32Array; lines: Float32Array; stats: ViewerStats };
 
 const vertexShader = `
@@ -125,7 +138,8 @@ function demoGeometry(variant: string) {
 
 function parseObj(name: string, buffer: ArrayBuffer): Geometry {
   if (!name.toLowerCase().endsWith(".obj")) throw new Error("请选择 Wavefront OBJ 模型文件");
-  const vertices: number[][] = [], raw: number[] = [];
+  const vertices: number[][] = [], raw: number[] = [], faces: number[][] = [];
+  let uvCount = 0, normalCount = 0, referencedUvCorners = 0, referencedNormalCorners = 0, totalCorners = 0, degenerateFaces = 0;
   const lines = new TextDecoder().decode(buffer).split(/\r?\n/);
   for (const sourceLine of lines) {
     const line = sourceLine.trim();
@@ -134,20 +148,62 @@ function parseObj(name: string, buffer: ArrayBuffer): Geometry {
     if (parts[0] === "v" && parts.length >= 4) {
       const point = parts.slice(1,4).map(Number);
       if (point.every(Number.isFinite)) vertices.push(point);
+    } else if (parts[0] === "vt" && parts.length >= 3) {
+      uvCount++;
+    } else if (parts[0] === "vn" && parts.length >= 4) {
+      normalCount++;
     } else if (parts[0] === "f" && parts.length >= 4) {
-      const face = parts.slice(1).map((token) => {
-        const value = Number(token.split("/")[0]);
+      const tokens = parts.slice(1);
+      totalCorners += tokens.length;
+      const face = tokens.map((token) => {
+        const refs = token.split("/");
+        if (refs[1]) referencedUvCorners++;
+        if (refs[2]) referencedNormalCorners++;
+        const value = Number(refs[0]);
         return value < 0 ? vertices.length + value : value - 1;
       });
       if (face.some((index) => !Number.isInteger(index) || index < 0 || index >= vertices.length)) throw new Error("OBJ 面片引用了无效顶点索引");
+      faces.push(face);
+      if (new Set(face).size < 3) degenerateFaces++;
       for (let i = 1; i < face.length - 1; i++) raw.push(...vertices[face[0]], ...vertices[face[i]], ...vertices[face[i + 1]]);
     }
   }
   if (!vertices.length) throw new Error("OBJ 文件中没有顶点数据");
   if (!raw.length) throw new Error("OBJ 文件中没有可显示的面片");
   const geometry = finalize(raw);
-  geometry.stats.vertices = vertices.length;
+  const edgeUse = new Map<string, number>(), used = new Set<number>();
+  const neighbors = Array.from({ length: vertices.length }, () => new Set<number>());
+  for (const face of faces) {
+    face.forEach((index) => used.add(index));
+    for (let i = 0; i < face.length; i++) {
+      const a = face[i], b = face[(i + 1) % face.length];
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      edgeUse.set(key, (edgeUse.get(key) || 0) + 1);
+      neighbors[a].add(b); neighbors[b].add(a);
+    }
+  }
+  const boundaryEdges = [...edgeUse.values()].filter((count) => count === 1).length;
+  const nonManifoldEdges = [...edgeUse.values()].filter((count) => count > 2).length;
+  const poles = [...used].filter((index) => neighbors[index].size < 3 || neighbors[index].size > 6).length;
+  geometry.stats = {
+    triangles: geometry.stats.triangles,
+    vertices: vertices.length,
+    faces: faces.length,
+    quadRatio: faces.filter((face) => face.length === 4).length / faces.length,
+    ngonCount: faces.filter((face) => face.length > 4).length,
+    boundaryEdges,
+    nonManifoldEdges,
+    degenerateFaces,
+    isolatedVertices: vertices.length - used.size,
+    poleRatio: used.size ? poles / used.size : 1,
+    uvCoverage: uvCount && totalCorners ? referencedUvCorners / totalCorners : 0,
+    normalCoverage: normalCount && totalCorners ? referencedNormalCorners / totalCorners : 0,
+  };
   return geometry;
+}
+
+export function analyzeObj(name: string, buffer: ArrayBuffer): ViewerStats {
+  return parseObj(name, buffer).stats;
 }
 
 function parseFile(name: string, buffer: ArrayBuffer): Geometry {
