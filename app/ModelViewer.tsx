@@ -67,14 +67,6 @@ function rotationY(v: number) {
   const c = Math.cos(v), s = Math.sin(v); return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
 }
 
-function scale(x: number, y: number, z: number) {
-  return new Float32Array([x, 0, 0, 0, 0, y, 0, 0, 0, 0, z, 0, 0, 0, 0, 1]);
-}
-
-function transformPoint(m: ArrayLike<number>, x: number, y: number, z: number) {
-  return [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14]];
-}
-
 function normalizeGeometry(raw: number[]) {
   let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
   for (let i = 0; i < raw.length; i += 3) {
@@ -131,59 +123,35 @@ function demoGeometry(variant: string) {
   return finalize(raw);
 }
 
-function readAccessor(json: any, buffers: ArrayBuffer[], accessorIndex: number): number[] {
-  const accessor = json.accessors[accessorIndex], view = json.bufferViews[accessor.bufferView], buffer = buffers[view.buffer || 0];
-  if (!buffer) throw new Error("模型引用了缺失的外部 BIN 文件");
-  const components: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
-  const componentBytes: Record<number, number> = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 };
-  const count = components[accessor.type], bytes = componentBytes[accessor.componentType], stride = view.byteStride || count * bytes;
-  const offset = (view.byteOffset || 0) + (accessor.byteOffset || 0), data = new DataView(buffer), result: number[] = [];
-  const get = (pos: number) => accessor.componentType === 5126 ? data.getFloat32(pos, true) : accessor.componentType === 5125 ? data.getUint32(pos, true) : accessor.componentType === 5123 ? data.getUint16(pos, true) : accessor.componentType === 5122 ? data.getInt16(pos, true) : accessor.componentType === 5121 ? data.getUint8(pos) : data.getInt8(pos);
-  for (let i = 0; i < accessor.count; i++) for (let c = 0; c < count; c++) result.push(get(offset + i * stride + c * bytes));
-  return result;
-}
-
-function nodeMatrix(node: any) {
-  if (node.matrix) return new Float32Array(node.matrix);
-  const t = node.translation || [0,0,0], s = node.scale || [1,1,1], q = node.rotation || [0,0,0,1];
-  const [x,y,z,w] = q, x2=x+x, y2=y+y, z2=z+z;
-  const r = new Float32Array([1-(y*y2+z*z2),x*y2+z*w,x*z2-y*w,0,x*y2-z*w,1-(x*x2+z*z2),y*z2+x*w,0,x*z2+y*w,y*z2-x*w,1-(x*x2+y*y2),0,t[0],t[1],t[2],1]);
-  return multiply(r, scale(s[0],s[1],s[2]));
-}
-
-function parseGltf(json: any, buffers: ArrayBuffer[]): Geometry {
-  const raw: number[] = [], scene = json.scenes?.[json.scene || 0], roots = scene?.nodes || json.nodes?.map((_: any, i: number) => i) || [];
-  const visit = (index: number, parent: Float32Array) => {
-    const node = json.nodes[index], world = multiply(parent, nodeMatrix(node));
-    if (node.mesh !== undefined) for (const primitive of json.meshes[node.mesh].primitives || []) {
-      if (primitive.mode !== undefined && primitive.mode !== 4) continue;
-      const pos = readAccessor(json,buffers,primitive.attributes.POSITION), indices = primitive.indices === undefined ? Array.from({length:pos.length/3},(_,i)=>i) : readAccessor(json,buffers,primitive.indices);
-      for (const idx of indices) raw.push(...transformPoint(world,pos[idx*3],pos[idx*3+1],pos[idx*3+2]));
+function parseObj(name: string, buffer: ArrayBuffer): Geometry {
+  if (!name.toLowerCase().endsWith(".obj")) throw new Error("请选择 Wavefront OBJ 模型文件");
+  const vertices: number[][] = [], raw: number[] = [];
+  const lines = new TextDecoder().decode(buffer).split(/\r?\n/);
+  for (const sourceLine of lines) {
+    const line = sourceLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const parts = line.split(/\s+/);
+    if (parts[0] === "v" && parts.length >= 4) {
+      const point = parts.slice(1,4).map(Number);
+      if (point.every(Number.isFinite)) vertices.push(point);
+    } else if (parts[0] === "f" && parts.length >= 4) {
+      const face = parts.slice(1).map((token) => {
+        const value = Number(token.split("/")[0]);
+        return value < 0 ? vertices.length + value : value - 1;
+      });
+      if (face.some((index) => !Number.isInteger(index) || index < 0 || index >= vertices.length)) throw new Error("OBJ 面片引用了无效顶点索引");
+      for (let i = 1; i < face.length - 1; i++) raw.push(...vertices[face[0]], ...vertices[face[i]], ...vertices[face[i + 1]]);
     }
-    for (const child of node.children || []) visit(child,world);
-  };
-  roots.forEach((n: number) => visit(n,identity()));
-  if (!raw.length) throw new Error("模型中没有可显示的三角形网格");
-  return finalize(raw);
+  }
+  if (!vertices.length) throw new Error("OBJ 文件中没有顶点数据");
+  if (!raw.length) throw new Error("OBJ 文件中没有可显示的面片");
+  const geometry = finalize(raw);
+  geometry.stats.vertices = vertices.length;
+  return geometry;
 }
 
 function parseFile(name: string, buffer: ArrayBuffer): Geometry {
-  if (name.toLowerCase().endsWith(".glb")) {
-    const data = new DataView(buffer);
-    if (data.getUint32(0,true) !== 0x46546c67 || data.getUint32(4,true) !== 2) throw new Error("仅支持 glTF 2.0 GLB 文件");
-    let offset = 12, json: any, bin: ArrayBuffer | undefined;
-    while (offset < buffer.byteLength) {
-      const length=data.getUint32(offset,true), type=data.getUint32(offset+4,true), chunk=buffer.slice(offset+8,offset+8+length); offset += 8+length;
-      if (type === 0x4e4f534a) json=JSON.parse(new TextDecoder().decode(chunk)); else if (type === 0x004e4942) bin=chunk;
-    }
-    if (!json || !bin) throw new Error("GLB 文件缺少 JSON 或 BIN 数据块");
-    return parseGltf(json,[bin]);
-  }
-  const json=JSON.parse(new TextDecoder().decode(buffer)), buffers=(json.buffers || []).map((b:any) => {
-    if (!b.uri?.startsWith("data:")) throw new Error(".gltf 必须使用内嵌 Buffer；含外部 .bin 时请导出为 .glb");
-    const base64=b.uri.split(",")[1], bytes=Uint8Array.from(atob(base64),c=>c.charCodeAt(0)); return bytes.buffer;
-  });
-  return parseGltf(json,buffers);
+  return parseObj(name, buffer);
 }
 
 function compile(gl: WebGLRenderingContext, type: number, source: string) {
