@@ -19,6 +19,9 @@ export type ViewerStats = {
   poleRatio?: number;
   uvCoverage?: number;
   normalCoverage?: number;
+  jointLoopScore?: number;
+  jointLoopCounts?: { elbows: number; knees: number; waist: number };
+  jointWarnings?: string[];
 };
 type Geometry = { positions: Float32Array; normals: Float32Array; lines: Float32Array; stats: ViewerStats };
 
@@ -306,6 +309,59 @@ function parseObj(name: string, buffer: ArrayBuffer): Geometry {
   const boundaryEdges = [...edgeUse.values()].filter((count) => count === 1).length;
   const nonManifoldEdges = [...edgeUse.values()].filter((count) => count > 2).length;
   const poles = [...used].filter((index) => neighbors[index].size < 3 || neighbors[index].size > 6).length;
+  const min = [Infinity, Infinity, Infinity], max = [-Infinity, -Infinity, -Infinity];
+  for (const point of vertices) for (let axis = 0; axis < 3; axis++) {
+    min[axis] = Math.min(min[axis], point[axis]);
+    max[axis] = Math.max(max[axis], point[axis]);
+  }
+  const size = [0, 1, 2].map((axis) => Math.max(1e-6, max[axis] - min[axis]));
+  const normalized = vertices.map((point) => [
+    (point[0] - min[0]) / size[1] - size[0] / size[1] / 2,
+    (point[1] - min[1]) / size[1],
+    (point[2] - min[2]) / size[1] - size[2] / size[1] / 2,
+  ]);
+  const countBands = (candidates: number[]) => {
+    candidates.sort((a, b) => a - b);
+    const clusters: number[][] = [];
+    for (const value of candidates) {
+      const cluster = clusters[clusters.length - 1];
+      if (!cluster || value - cluster[cluster.length - 1] > .009) clusters.push([value]);
+      else cluster.push(value);
+    }
+    return Math.min(5, clusters.filter((cluster) => cluster.length >= 5).length);
+  };
+  const halfWidth = size[0] / size[1] / 2;
+  const armReach = Math.max(.01, halfWidth - .18);
+  const elbowTarget = .18 + armReach * .52;
+  const jointCandidates = { leftElbow: [] as number[], rightElbow: [] as number[], knees: [] as number[], waist: [] as number[] };
+  for (const key of edgeUse.keys()) {
+    const separator = key.indexOf(":");
+    const a = Number(key.slice(0, separator)), b = Number(key.slice(separator + 1));
+    const pa = normalized[a], pb = normalized[b];
+    const xMid = (pa[0] + pb[0]) / 2, yMid = (pa[1] + pb[1]) / 2;
+    if (Math.abs(pa[0] - pb[0]) <= .012 && pa[1] > .47 && pa[1] < .82 && pb[1] > .47 && pb[1] < .82) {
+      if (pa[0] < -.16 && pb[0] < -.16 && Math.abs(xMid + elbowTarget) <= .075) jointCandidates.leftElbow.push(xMid);
+      if (pa[0] > .16 && pb[0] > .16 && Math.abs(xMid - elbowTarget) <= .075) jointCandidates.rightElbow.push(xMid);
+    }
+    if (Math.abs(pa[1] - pb[1]) <= .012 && Math.abs(yMid - .265) <= .075) {
+      if (Math.abs(pa[0]) > .035 && Math.abs(pa[0]) < .28 && Math.abs(pb[0]) > .035 && Math.abs(pb[0]) < .28) jointCandidates.knees.push(yMid);
+    }
+    if (Math.abs(pa[1] - pb[1]) <= .012 && Math.abs(yMid - .52) <= .065) {
+      if (Math.abs(pa[0]) < .24 && Math.abs(pb[0]) < .24) jointCandidates.waist.push(yMid);
+    }
+  }
+  const leftElbow = countBands(jointCandidates.leftElbow);
+  const rightElbow = countBands(jointCandidates.rightElbow);
+  const elbows = Math.min(leftElbow, rightElbow);
+  const knees = countBands(jointCandidates.knees);
+  const waist = countBands(jointCandidates.waist);
+  const jointLoopCounts = { elbows, knees, waist };
+  const jointLoopScore = (Math.min(elbows, 3) + Math.min(knees, 3) + Math.min(waist, 3)) / 9;
+  const jointWarnings = [
+    elbows < 3 ? "手肘环线不足" : "",
+    knees < 3 ? "膝盖环线不足" : "",
+    waist < 3 ? "腰部环线不足" : "",
+  ].filter(Boolean);
   geometry.stats = {
     triangles: geometry.stats.triangles,
     vertices: vertices.length,
@@ -319,6 +375,9 @@ function parseObj(name: string, buffer: ArrayBuffer): Geometry {
     poleRatio: used.size ? poles / used.size : 1,
     uvCoverage: uvCount && totalCorners ? referencedUvCorners / totalCorners : 0,
     normalCoverage: normalCount && totalCorners ? referencedNormalCorners / totalCorners : 0,
+    jointLoopScore,
+    jointLoopCounts,
+    jointWarnings,
   };
   return geometry;
 }
