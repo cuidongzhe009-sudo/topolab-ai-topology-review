@@ -22,6 +22,7 @@ type Model = {
     ngonCount: number;
     jointLoopScore: number;
     jointLoopCounts: { elbows: number; knees: number; waist: number };
+    jointDensityRatios: { elbows: number; knees: number; waist: number };
     jointWarnings: string[];
   };
 };
@@ -29,12 +30,12 @@ type Model = {
 type UploadedAsset = { model: Model; fileName: string; buffer: ArrayBuffer };
 
 const standards = [
-  { name: "轮廓还原", weight: 15, detail: "关键动作视角下轮廓与体块稳定", value: 92 },
-  { name: "变形边流", weight: 25, detail: "边流顺应肌肉走向与关节弯曲轴", value: 88 },
-  { name: "绑定适配", weight: 25, detail: "肩、肘、髋、膝有连续环线与权重缓冲带", value: 87 },
-  { name: "面数效率", weight: 15, detail: "变形区有预算，刚性区不堆叠无效边", value: 86 },
+  { name: "轮廓还原", weight: 10, detail: "关键动作视角下轮廓与体块稳定", value: 92 },
+  { name: "变形边流", weight: 30, detail: "活动关节环线连续，沿弯曲轴形成可控变形带", value: 88 },
+  { name: "绑定适配", weight: 35, detail: "手肘、膝盖、腰部环线密度应高于相邻刚性区域", value: 87 },
+  { name: "面数效率", weight: 10, detail: "面数优先分配给活动关节，刚性区不堆叠无效边", value: 86 },
   { name: "拓扑健康", weight: 10, detail: "避免非流形、退化面、孤立点与高风险极点", value: 90 },
-  { name: "UV / 法线", weight: 10, detail: "接缝避开拉伸区，法线与烘焙连续", value: 94 },
+  { name: "UV / 法线", weight: 5, detail: "接缝避开拉伸区，法线与烘焙连续", value: 94 },
 ];
 
 const models: Model[] = [
@@ -60,8 +61,15 @@ function qualityFromStats(stats: ViewerStats) {
   const boundaryPressure = (stats.boundaryEdges || 0) / Math.max(1, faces * 2);
   const topologyPenalty = (stats.nonManifoldEdges || 0) * 18 + (stats.degenerateFaces || 0) * 12 + (stats.isolatedVertices || 0) * 4;
   const silhouette = clamp(86 + Math.min(8, Math.log10(Math.max(10, stats.vertices)) * 3) - (stats.degenerateFaces || 0) * 3);
-  const deformationFlow = clamp(36 + quadRatio * 30 + jointLoopScore * 38 - poleRatio * 22 - (stats.ngonCount || 0) / faces * 30);
-  const rigReadiness = clamp(34 + quadRatio * 27 + jointLoopScore * 43 - poleRatio * 18 - boundaryPressure * 14 - topologyPenalty);
+  let deformationFlow = clamp(20 + quadRatio * 22 + jointLoopScore * 66 - poleRatio * 22 - (stats.ngonCount || 0) / faces * 30);
+  let rigReadiness = clamp(18 + quadRatio * 18 + jointLoopScore * 72 - poleRatio * 18 - boundaryPressure * 14 - topologyPenalty);
+  if (jointLoopScore < .4) {
+    deformationFlow = Math.min(deformationFlow, 48);
+    rigReadiness = Math.min(rigReadiness, 42);
+  } else if (jointLoopScore < .65) {
+    deformationFlow = Math.min(deformationFlow, 68);
+    rigReadiness = Math.min(rigReadiness, 60);
+  }
   const efficiency = clamp(96 - Math.max(0, stats.triangles - 50000) / 1800 - (stats.isolatedVertices || 0) * 2);
   const topologyHealth = clamp(98 - topologyPenalty - boundaryPressure * 10);
   const surface = clamp(55 + (stats.uvCoverage || 0) * 25 + (stats.normalCoverage || 0) * 20);
@@ -78,9 +86,11 @@ function ScoreRing({ score, small = false }: { score: number; small?: boolean })
 
 function JointLoopAudit({ audit, compact = false }: { audit: NonNullable<Model["audit"]>; compact?: boolean }) {
   const { elbows, knees, waist } = audit.jointLoopCounts;
+  const density = audit.jointDensityRatios;
   return <div className={`joint-loop-audit ${audit.jointWarnings.length ? "has-risk" : "is-ready"} ${compact ? "compact" : ""}`}>
     <div><span>关节环线支持度</span><b>{Math.round(audit.jointLoopScore * 100)}%</b></div>
-    <p>手肘 {elbows} 组 · 膝盖 {knees} 组 · 腰部 {waist} 组</p>
+    <p>手肘 {elbows} 组 / {density.elbows.toFixed(2)}× · 膝盖 {knees} 组 / {density.knees.toFixed(2)}× · 腰部 {waist} 组 / {density.waist.toFixed(2)}×</p>
+    <em>密度倍率 = 关节环线密度 ÷ 相邻刚性区域；合格目标 ≥ 1.20×</em>
     {audit.jointWarnings.length > 0 && <small>{audit.jointWarnings.join(" · ")}，会增加弯曲塌陷和权重过渡风险</small>}
   </div>;
 }
@@ -146,6 +156,7 @@ export default function Home() {
             ngonCount: stats.ngonCount || 0,
             jointLoopScore: stats.jointLoopScore || 0,
             jointLoopCounts: stats.jointLoopCounts || { elbows: 0, knees: 0, waist: 0 },
+            jointDensityRatios: stats.jointDensityRatios || { elbows: 0, knees: 0, waist: 0 },
             jointWarnings: stats.jointWarnings || [],
           },
         };
