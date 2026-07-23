@@ -21,6 +21,7 @@ export type ViewerStats = {
   normalCoverage?: number;
   jointLoopScore?: number;
   jointLoopCounts?: { elbows: number; knees: number; waist: number };
+  jointDensityRatios?: { elbows: number; knees: number; waist: number };
   jointWarnings?: string[];
 };
 type Geometry = { positions: Float32Array; normals: Float32Array; lines: Float32Array; stats: ViewerStats };
@@ -328,26 +329,48 @@ function parseObj(name: string, buffer: ArrayBuffer): Geometry {
       if (!cluster || value - cluster[cluster.length - 1] > .009) clusters.push([value]);
       else cluster.push(value);
     }
-    return Math.min(5, clusters.filter((cluster) => cluster.length >= 5).length);
+    return clusters.filter((cluster) => cluster.length >= 5).length;
   };
   const halfWidth = size[0] / size[1] / 2;
   const armReach = Math.max(.01, halfWidth - .18);
   const elbowTarget = .18 + armReach * .52;
-  const jointCandidates = { leftElbow: [] as number[], rightElbow: [] as number[], knees: [] as number[], waist: [] as number[] };
+  const jointCandidates = {
+    leftElbow: [] as number[], leftElbowInner: [] as number[], leftElbowOuter: [] as number[],
+    rightElbow: [] as number[], rightElbowInner: [] as number[], rightElbowOuter: [] as number[],
+    knees: [] as number[], kneesLower: [] as number[], kneesUpper: [] as number[],
+    waist: [] as number[], waistLower: [] as number[], waistUpper: [] as number[],
+  };
+  const collectBand = (target: number, value: number, output: number[], radius = .06) => {
+    if (Math.abs(value - target) <= radius) output.push(value);
+  };
   for (const key of edgeUse.keys()) {
     const separator = key.indexOf(":");
     const a = Number(key.slice(0, separator)), b = Number(key.slice(separator + 1));
     const pa = normalized[a], pb = normalized[b];
     const xMid = (pa[0] + pb[0]) / 2, yMid = (pa[1] + pb[1]) / 2;
     if (Math.abs(pa[0] - pb[0]) <= .012 && pa[1] > .47 && pa[1] < .82 && pb[1] > .47 && pb[1] < .82) {
-      if (pa[0] < -.16 && pb[0] < -.16 && Math.abs(xMid + elbowTarget) <= .075) jointCandidates.leftElbow.push(xMid);
-      if (pa[0] > .16 && pb[0] > .16 && Math.abs(xMid - elbowTarget) <= .075) jointCandidates.rightElbow.push(xMid);
+      if (pa[0] < -.16 && pb[0] < -.16) {
+        collectBand(-elbowTarget, xMid, jointCandidates.leftElbow, .07);
+        collectBand(-(elbowTarget - .14), xMid, jointCandidates.leftElbowInner);
+        collectBand(-(elbowTarget + .14), xMid, jointCandidates.leftElbowOuter);
+      }
+      if (pa[0] > .16 && pb[0] > .16) {
+        collectBand(elbowTarget, xMid, jointCandidates.rightElbow, .07);
+        collectBand(elbowTarget - .14, xMid, jointCandidates.rightElbowInner);
+        collectBand(elbowTarget + .14, xMid, jointCandidates.rightElbowOuter);
+      }
     }
-    if (Math.abs(pa[1] - pb[1]) <= .012 && Math.abs(yMid - .265) <= .075) {
-      if (Math.abs(pa[0]) > .035 && Math.abs(pa[0]) < .28 && Math.abs(pb[0]) > .035 && Math.abs(pb[0]) < .28) jointCandidates.knees.push(yMid);
-    }
-    if (Math.abs(pa[1] - pb[1]) <= .012 && Math.abs(yMid - .52) <= .065) {
-      if (Math.abs(pa[0]) < .24 && Math.abs(pb[0]) < .24) jointCandidates.waist.push(yMid);
+    if (Math.abs(pa[1] - pb[1]) <= .012) {
+      if (Math.abs(pa[0]) > .035 && Math.abs(pa[0]) < .28 && Math.abs(pb[0]) > .035 && Math.abs(pb[0]) < .28) {
+        collectBand(.265, yMid, jointCandidates.knees, .07);
+        collectBand(.12, yMid, jointCandidates.kneesLower);
+        collectBand(.41, yMid, jointCandidates.kneesUpper);
+      }
+      if (Math.abs(pa[0]) < .24 && Math.abs(pb[0]) < .24) {
+        collectBand(.52, yMid, jointCandidates.waist);
+        collectBand(.37, yMid, jointCandidates.waistLower);
+        collectBand(.67, yMid, jointCandidates.waistUpper);
+      }
     }
   }
   const leftElbow = countBands(jointCandidates.leftElbow);
@@ -356,11 +379,29 @@ function parseObj(name: string, buffer: ArrayBuffer): Geometry {
   const knees = countBands(jointCandidates.knees);
   const waist = countBands(jointCandidates.waist);
   const jointLoopCounts = { elbows, knees, waist };
-  const jointLoopScore = (Math.min(elbows, 3) + Math.min(knees, 3) + Math.min(waist, 3)) / 9;
+  const referenceDensity = (a: number[], b: number[]) => (countBands(a) + countBands(b)) / 2;
+  const densityRatio = (joint: number, reference: number) => Math.min(3, (joint + .5) / (reference + .5));
+  const leftElbowRatio = densityRatio(leftElbow, referenceDensity(jointCandidates.leftElbowInner, jointCandidates.leftElbowOuter));
+  const rightElbowRatio = densityRatio(rightElbow, referenceDensity(jointCandidates.rightElbowInner, jointCandidates.rightElbowOuter));
+  const jointDensityRatios = {
+    elbows: Math.min(leftElbowRatio, rightElbowRatio),
+    knees: densityRatio(knees, referenceDensity(jointCandidates.kneesLower, jointCandidates.kneesUpper)),
+    waist: densityRatio(waist, referenceDensity(jointCandidates.waistLower, jointCandidates.waistUpper)),
+  };
+  const supportScore = (count: number, ratio: number) => {
+    const countScore = Math.min(1, count / 3);
+    const densityScore = Math.max(0, Math.min(1, (ratio - .85) / .55));
+    return countScore * .3 + densityScore * .7;
+  };
+  const jointLoopScore = (
+    supportScore(elbows, jointDensityRatios.elbows) +
+    supportScore(knees, jointDensityRatios.knees) +
+    supportScore(waist, jointDensityRatios.waist)
+  ) / 3;
   const jointWarnings = [
-    elbows < 3 ? "手肘环线不足" : "",
-    knees < 3 ? "膝盖环线不足" : "",
-    waist < 3 ? "腰部环线不足" : "",
+    elbows < 3 || jointDensityRatios.elbows < 1.2 ? "手肘环线密度不足" : "",
+    knees < 3 || jointDensityRatios.knees < 1.2 ? "膝盖环线密度不足" : "",
+    waist < 3 || jointDensityRatios.waist < 1.2 ? "腰部环线密度不足" : "",
   ].filter(Boolean);
   geometry.stats = {
     triangles: geometry.stats.triangles,
@@ -377,6 +418,7 @@ function parseObj(name: string, buffer: ArrayBuffer): Geometry {
     normalCoverage: normalCount && totalCorners ? referencedNormalCorners / totalCorners : 0,
     jointLoopScore,
     jointLoopCounts,
+    jointDensityRatios,
     jointWarnings,
   };
   return geometry;
