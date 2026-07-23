@@ -11,7 +11,7 @@ type Model = {
   tris: string;
   verts: string;
   texture: string;
-  poly: "char" | "prop" | "env" | "vehicle";
+  poly: "char" | "beast" | "prop" | "env" | "vehicle";
   color: string;
   quality: number[];
   local?: boolean;
@@ -30,12 +30,12 @@ const standards = [
 ];
 
 const models: Model[] = [
-  { id: 1, name: "KAI / Hero", type: "角色", score: 91, tris: "18.4K", verts: "9.7K", texture: "2K × 3", poly: "char", color: "#d8ff4f", quality: [94, 92, 91, 86, 90, 93] },
-  { id: 2, name: "Ranger-07", type: "角色", score: 82, tris: "22.1K", verts: "11.8K", texture: "2K × 3", poly: "char", color: "#ffb86b", quality: [88, 82, 76, 72, 84, 91] },
-  { id: 3, name: "Scout Bike", type: "载具", score: 87, tris: "31.6K", verts: "16.2K", texture: "4K × 2", poly: "vehicle", color: "#79a8ff", quality: [92, 86, 84, 88, 90, 90] },
-  { id: 4, name: "Forest Shrine", type: "场景", score: 78, tris: "46.8K", verts: "24.1K", texture: "2K × 5", poly: "env", color: "#bf94ff", quality: [83, 76, 72, 75, 78, 85] },
-  { id: 5, name: "Plasma Axe", type: "道具", score: 93, tris: "6.2K", verts: "3.4K", texture: "2K × 2", poly: "prop", color: "#72efd0", quality: [96, 93, 90, 95, 94, 96] },
-  { id: 6, name: "Mech Hound", type: "角色", score: 73, tris: "28.9K", verts: "15.3K", texture: "2K × 4", poly: "char", color: "#ff7c8c", quality: [82, 72, 62, 66, 74, 86] },
+  { id: 1, name: "KAI / Hero", type: "角色", score: 91, tris: "684", verts: "362", texture: "1K × 2", poly: "char", color: "#d8ff4f", quality: [94, 92, 91, 94, 90, 93] },
+  { id: 2, name: "Ranger-07", type: "角色", score: 86, tris: "684", verts: "362", texture: "1K × 2", poly: "char", color: "#ffb86b", quality: [90, 88, 86, 94, 89, 91] },
+  { id: 3, name: "Scout Bike", type: "载具", score: 89, tris: "356", verts: "196", texture: "1K × 2", poly: "vehicle", color: "#79a8ff", quality: [92, 88, 84, 96, 92, 90] },
+  { id: 4, name: "Forest Shrine", type: "场景", score: 85, tris: "428", verts: "238", texture: "2K × 3", poly: "env", color: "#bf94ff", quality: [88, 82, 78, 92, 88, 85] },
+  { id: 5, name: "Plasma Axe", type: "道具", score: 94, tris: "112", verts: "68", texture: "1K × 1", poly: "prop", color: "#72efd0", quality: [96, 93, 90, 99, 95, 96] },
+  { id: 6, name: "Mech Hound", type: "角色", score: 87, tris: "436", verts: "244", texture: "1K × 2", poly: "beast", color: "#ff7c8c", quality: [89, 87, 84, 96, 88, 86] },
 ];
 
 const labels = ["轮廓", "变形边流", "绑定适配", "效率", "拓扑健康", "UV/法线"];
