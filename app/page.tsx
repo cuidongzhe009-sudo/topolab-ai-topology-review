@@ -15,7 +15,15 @@ type Model = {
   color: string;
   quality: number[];
   local?: boolean;
-  audit?: { quadRatio: number; boundaryEdges: number; nonManifoldEdges: number; ngonCount: number };
+  audit?: {
+    quadRatio: number;
+    boundaryEdges: number;
+    nonManifoldEdges: number;
+    ngonCount: number;
+    jointLoopScore: number;
+    jointLoopCounts: { elbows: number; knees: number; waist: number };
+    jointWarnings: string[];
+  };
 };
 
 type UploadedAsset = { model: Model; fileName: string; buffer: ArrayBuffer };
@@ -47,12 +55,13 @@ const formatCount = (value: number) => value >= 1000 ? `${(value / 1000).toFixed
 function qualityFromStats(stats: ViewerStats) {
   const faces = Math.max(1, stats.faces || stats.triangles);
   const quadRatio = stats.quadRatio || 0;
+  const jointLoopScore = stats.jointLoopScore || 0;
   const poleRatio = stats.poleRatio || 0;
   const boundaryPressure = (stats.boundaryEdges || 0) / Math.max(1, faces * 2);
   const topologyPenalty = (stats.nonManifoldEdges || 0) * 18 + (stats.degenerateFaces || 0) * 12 + (stats.isolatedVertices || 0) * 4;
   const silhouette = clamp(86 + Math.min(8, Math.log10(Math.max(10, stats.vertices)) * 3) - (stats.degenerateFaces || 0) * 3);
-  const deformationFlow = clamp(52 + quadRatio * 43 - poleRatio * 22 - (stats.ngonCount || 0) / faces * 30);
-  const rigReadiness = clamp(58 + quadRatio * 38 - poleRatio * 18 - boundaryPressure * 14 - topologyPenalty);
+  const deformationFlow = clamp(36 + quadRatio * 30 + jointLoopScore * 38 - poleRatio * 22 - (stats.ngonCount || 0) / faces * 30);
+  const rigReadiness = clamp(34 + quadRatio * 27 + jointLoopScore * 43 - poleRatio * 18 - boundaryPressure * 14 - topologyPenalty);
   const efficiency = clamp(96 - Math.max(0, stats.triangles - 50000) / 1800 - (stats.isolatedVertices || 0) * 2);
   const topologyHealth = clamp(98 - topologyPenalty - boundaryPressure * 10);
   const surface = clamp(55 + (stats.uvCoverage || 0) * 25 + (stats.normalCoverage || 0) * 20);
@@ -65,6 +74,15 @@ function weightedScore(quality: number[]) {
 
 function ScoreRing({ score, small = false }: { score: number; small?: boolean }) {
   return <div className={`score-ring ${small ? "small" : ""}`} style={{ "--score": `${score * 3.6}deg` } as React.CSSProperties}><strong>{score}</strong><span>{small ? "" : "综合分"}</span></div>;
+}
+
+function JointLoopAudit({ audit, compact = false }: { audit: NonNullable<Model["audit"]>; compact?: boolean }) {
+  const { elbows, knees, waist } = audit.jointLoopCounts;
+  return <div className={`joint-loop-audit ${audit.jointWarnings.length ? "has-risk" : "is-ready"} ${compact ? "compact" : ""}`}>
+    <div><span>关节环线支持度</span><b>{Math.round(audit.jointLoopScore * 100)}%</b></div>
+    <p>手肘 {elbows} 组 · 膝盖 {knees} 组 · 腰部 {waist} 组</p>
+    {audit.jointWarnings.length > 0 && <small>{audit.jointWarnings.join(" · ")}，会增加弯曲塌陷和权重过渡风险</small>}
+  </div>;
 }
 
 export default function Home() {
@@ -84,6 +102,9 @@ export default function Home() {
   const libraryModels = useMemo(() => [...uploadedAssets.map((asset) => asset.model), ...models], [uploadedAssets]);
   const left = libraryModels.find((m) => m.id === leftId) || libraryModels[0];
   const right = libraryModels.find((m) => m.id === rightId) || libraryModels.find((m) => m.id !== left.id) || libraryModels[0];
+  const pkRiskModel = [left, right]
+    .filter((model) => model.audit?.jointWarnings.length)
+    .sort((a, b) => (a.audit?.jointLoopScore || 0) - (b.audit?.jointLoopScore || 0))[0];
   const filtered = filter === "全部" ? libraryModels : libraryModels.filter((m) => m.type === filter);
   const navigate = (next: string) => { setTab(next); window.scrollTo({ top: 0, behavior: "smooth" }); };
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(""), 2200); };
@@ -123,6 +144,9 @@ export default function Home() {
             boundaryEdges: stats.boundaryEdges || 0,
             nonManifoldEdges: stats.nonManifoldEdges || 0,
             ngonCount: stats.ngonCount || 0,
+            jointLoopScore: stats.jointLoopScore || 0,
+            jointLoopCounts: stats.jointLoopCounts || { elbows: 0, knees: 0, waist: 0 },
+            jointWarnings: stats.jointWarnings || [],
           },
         };
         created.push({ model, fileName: file.name, buffer });
@@ -184,7 +208,7 @@ export default function Home() {
         <div className="page-title"><div><span className="index">MODEL LIBRARY / GAME ASSETS</span><h1>模型浏览</h1><p>可连续上传多个 Wavefront OBJ；每个模型都会保留在本地模型库，并生成面向动画绑定的拓扑评分。</p></div><div className="upload-actions"><button className="primary" onClick={() => uploadRef.current?.click()}>＋ 上传一个或多个 OBJ</button><small>不会覆盖已有模型 · 单文件最大 50MB · 不离开本机</small></div></div>
         <div className="filters">{["全部", "本地角色", "角色", "载具", "场景", "道具"].map(f => <button key={f} className={filter === f ? "active" : ""} onClick={() => setFilter(f)}>{f}</button>)}</div>
         <div className="model-layout"><div className="model-grid">{filtered.map(m => <button key={m.id} className={`model-card ${selected.id === m.id ? "selected" : ""}`} onClick={() => setSelected(m)}><div className="model-preview"><ModelViewer source={viewerSource(m)} compact /><ScoreRing score={m.score} small /></div><div className="model-info"><div><b>{m.name}</b><span>{m.type} · {m.local ? "LOCAL OBJ" : "GAME ASSET"}</span></div><em style={{ color: m.color }}>{m.tris} tris</em></div></button>)}</div>
-          <aside className="model-detail"><span className="side-label">SELECTED ASSET</span><h2>{selected.name}</h2><div className="detail-mesh"><ModelViewer source={viewerSource(selected)} onError={reportViewerError} /></div><div className="spec-row"><span>三角面<b>{selected.tris}</b></span><span>顶点<b>{selected.verts}</b></span><span>{selected.local ? "UV覆盖" : "贴图"}<b>{selected.texture}</b></span></div>{selected.audit && <div className="audit-strip"><span>四边面 <b>{Math.round(selected.audit.quadRatio * 100)}%</b></span><span>边界边 <b>{selected.audit.boundaryEdges}</b></span><span>非流形 <b>{selected.audit.nonManifoldEdges}</b></span><span>N-gon <b>{selected.audit.ngonCount}</b></span></div>}<h3>绑定与拓扑维度</h3>{selected.quality.map((q, i) => <div className="quality-row" key={labels[i]}><span>{labels[i]}</span><i><b style={{ width: `${q}%`, background: selected.color }} /></i><em>{q}</em></div>)}<button className="primary full" onClick={() => { setScores(selected.quality); navigate("evaluate"); }}>评测此模型 →</button></aside>
+          <aside className="model-detail"><span className="side-label">SELECTED ASSET</span><h2>{selected.name}</h2><div className="detail-mesh"><ModelViewer source={viewerSource(selected)} onError={reportViewerError} /></div><div className="spec-row"><span>三角面<b>{selected.tris}</b></span><span>顶点<b>{selected.verts}</b></span><span>{selected.local ? "UV覆盖" : "贴图"}<b>{selected.texture}</b></span></div>{selected.audit && <><div className="audit-strip"><span>四边面 <b>{Math.round(selected.audit.quadRatio * 100)}%</b></span><span>边界边 <b>{selected.audit.boundaryEdges}</b></span><span>非流形 <b>{selected.audit.nonManifoldEdges}</b></span><span>N-gon <b>{selected.audit.ngonCount}</b></span></div><JointLoopAudit audit={selected.audit} /></>}<h3>绑定与拓扑维度</h3>{selected.quality.map((q, i) => <div className="quality-row" key={labels[i]}><span>{labels[i]}</span><i><b style={{ width: `${q}%`, background: selected.color }} /></i><em>{q}</em></div>)}<button className="primary full" onClick={() => { setScores(selected.quality); navigate("evaluate"); }}>评测此模型 →</button></aside>
         </div>
       </section>}
 
@@ -198,9 +222,9 @@ export default function Home() {
       {tab === "pk" && <section className="workspace-section pk-workspace">
         <div className="page-title"><div><span className="index">MODEL PK / REAL LOCAL COMPARISON</span><h1>模型 PK</h1><p>选择任意两个样例或本地 OBJ，以真实网格统计和同一套绑定标准完成并排对比。</p></div><div className="pk-actions"><button className="primary" onClick={() => uploadRef.current?.click()}>＋ 上传 OBJ 参赛</button><button className="ghost" onClick={() => { setLeftId(right.id); setRightId(left.id); notify("已交换 A / B 组选手"); }}>交换 A / B</button></div></div>
         <div className="pk-selectors"><label>A 组选手<select value={left.id} onChange={e => setLeftId(Number(e.target.value))}>{libraryModels.filter(m => m.id !== right.id).map(m => <option key={m.id} value={m.id}>{m.local ? "[本地] " : ""}{m.name}</option>)}</select></label><div className="vs">VS</div><label>B 组选手<select value={right.id} onChange={e => setRightId(Number(e.target.value))}>{libraryModels.filter(m => m.id !== left.id).map(m => <option key={m.id} value={m.id}>{m.local ? "[本地] " : ""}{m.name}</option>)}</select></label></div>
-        <div className="pk-stage"><article style={{ "--model-color": left.color } as React.CSSProperties}><div className="pk-label">MODEL A · {left.local ? "LOCAL OBJ" : "SAMPLE"}</div><ModelViewer source={viewerSource(left)} /><h2>{left.name}</h2>{left.audit && <div className="pk-audit">QUADS {Math.round(left.audit.quadRatio * 100)}% · BOUNDARY {left.audit.boundaryEdges} · NON-MANIFOLD {left.audit.nonManifoldEdges}</div>}<div className="pk-specs"><span>{left.tris}<small>TRIS</small></span><span>{left.verts}<small>VERTS</small></span><ScoreRing score={left.score} small /></div></article><div className="pk-divider"><span>VS</span></div><article style={{ "--model-color": right.color } as React.CSSProperties}><div className="pk-label">MODEL B · {right.local ? "LOCAL OBJ" : "SAMPLE"}</div><ModelViewer source={viewerSource(right)} /><h2>{right.name}</h2>{right.audit && <div className="pk-audit">QUADS {Math.round(right.audit.quadRatio * 100)}% · BOUNDARY {right.audit.boundaryEdges} · NON-MANIFOLD {right.audit.nonManifoldEdges}</div>}<div className="pk-specs"><span>{right.tris}<small>TRIS</small></span><span>{right.verts}<small>VERTS</small></span><ScoreRing score={right.score} small /></div></article></div>
+        <div className="pk-stage"><article style={{ "--model-color": left.color } as React.CSSProperties}><div className="pk-label">MODEL A · {left.local ? "LOCAL OBJ" : "SAMPLE"}</div><ModelViewer source={viewerSource(left)} /><h2>{left.name}</h2>{left.audit && <><div className="pk-audit">QUADS {Math.round(left.audit.quadRatio * 100)}% · BOUNDARY {left.audit.boundaryEdges} · NON-MANIFOLD {left.audit.nonManifoldEdges}</div><JointLoopAudit audit={left.audit} compact /></>}<div className="pk-specs"><span>{left.tris}<small>TRIS</small></span><span>{left.verts}<small>VERTS</small></span><ScoreRing score={left.score} small /></div></article><div className="pk-divider"><span>VS</span></div><article style={{ "--model-color": right.color } as React.CSSProperties}><div className="pk-label">MODEL B · {right.local ? "LOCAL OBJ" : "SAMPLE"}</div><ModelViewer source={viewerSource(right)} /><h2>{right.name}</h2>{right.audit && <><div className="pk-audit">QUADS {Math.round(right.audit.quadRatio * 100)}% · BOUNDARY {right.audit.boundaryEdges} · NON-MANIFOLD {right.audit.nonManifoldEdges}</div><JointLoopAudit audit={right.audit} compact /></>}<div className="pk-specs"><span>{right.tris}<small>TRIS</small></span><span>{right.verts}<small>VERTS</small></span><ScoreRing score={right.score} small /></div></article></div>
         <div className="comparison-card"><div className="card-title"><div><span>维度对比</span><b>相同权重 · 标准化分数</b></div><strong className={left.score >= right.score ? "left-win" : "right-win"}>{left.score >= right.score ? "A" : "B"} 组领先 {Math.abs(left.score - right.score)} 分</strong></div><div className="compare-grid">{labels.map((label, i) => { const max = Math.max(left.quality[i], right.quality[i]); return <div className="compare-row" key={label}><b>{left.quality[i]}</b><div className="compare-left"><i style={{ width: `${left.quality[i]}%`, opacity: left.quality[i] === max ? 1 : .48 }} /></div><span>{label}</span><div className="compare-right"><i style={{ width: `${right.quality[i]}%`, opacity: right.quality[i] === max ? 1 : .48 }} /></div><b>{right.quality[i]}</b></div>})}</div></div>
-        <div className="decision"><div className="decision-icon">AI</div><div><span>决策建议 · 基于本次评分</span><h3>优先选择 {left.score >= right.score ? left.name : right.name}</h3><p>{left.score >= right.score ? left.name : right.name} 在核心维度上的综合表现更稳定。若用于实时项目，预计可减少约 {Math.max(6, Math.abs(left.score-right.score)*2)}% 的拓扑返修时间；最终决定仍建议结合目标平台预算。</p></div><button className="primary" onClick={() => notify("PK 报告已生成（Demo）")}>生成 PK 报告</button></div>
+        <div className="decision"><div className="decision-icon">AI</div><div><span>决策建议 · 基于本次评分</span><h3>优先选择 {left.score >= right.score ? left.name : right.name}</h3><p>{pkRiskModel?.audit ? `${pkRiskModel.name} 检出${pkRiskModel.audit.jointWarnings.join("、")}，其变形边流与绑定适配分已按局部关节风险扣减。` : `${left.score >= right.score ? left.name : right.name} 在核心维度上的综合表现更稳定。`} 若用于实时项目，预计可减少约 {Math.max(6, Math.abs(left.score-right.score)*2)}% 的拓扑返修时间；最终仍建议用屈肘、深蹲和躯干扭转动作复核。</p></div><button className="primary" onClick={() => notify("PK 报告已生成（Demo）")}>生成 PK 报告</button></div>
       </section>}
 
       <footer><div className="brand"><span className="brandmark">T</span><span>TOPOLAB</span></div><p>AI 辅助判断，专家负责决策。Demo 数据仅用于产品演示。</p><span>VIBE CODING DEMO · 2026</span></footer>
