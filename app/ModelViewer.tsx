@@ -107,31 +107,152 @@ function finalize(raw: number[]): Geometry {
   return { positions: new Float32Array(positions), normals: new Float32Array(normals), lines: new Float32Array(lines), stats: { triangles: positions.length / 9, vertices: positions.length / 3 } };
 }
 
-function addBox(raw: number[], center: number[], size: number[], tilt = 0) {
-  const [cx, cy, cz] = center, [sx, sy, sz] = size;
-  const base = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]].map(([x,y,z]) => {
-    const px=x*sx/2, py=y*sy/2, pz=z*sz/2, c=Math.cos(tilt), s=Math.sin(tilt);
-    return [cx+px*c-py*s,cy+px*s+py*c,cz+pz];
-  });
-  const faces = [0,1,2,0,2,3,4,6,5,4,7,6,0,4,5,0,5,1,3,2,6,3,6,7,1,5,6,1,6,2,0,3,7,0,7,4];
-  faces.forEach(i => raw.push(...base[i]));
+type Point3 = [number, number, number];
+
+function addTriangle(raw: number[], a: Point3, b: Point3, c: Point3) {
+  raw.push(...a, ...b, ...c);
+}
+
+function addCylinder(raw: number[], start: Point3, end: Point3, startRadius: number, endRadius = startRadius, segments = 8) {
+  const axis: Point3 = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+  const axisLength = Math.hypot(...axis) || 1;
+  const direction: Point3 = [axis[0] / axisLength, axis[1] / axisLength, axis[2] / axisLength];
+  const helper: Point3 = Math.abs(direction[1]) < .9 ? [0, 1, 0] : [1, 0, 0];
+  const sideA: Point3 = [
+    direction[1] * helper[2] - direction[2] * helper[1],
+    direction[2] * helper[0] - direction[0] * helper[2],
+    direction[0] * helper[1] - direction[1] * helper[0],
+  ];
+  const sideLength = Math.hypot(...sideA) || 1;
+  sideA[0] /= sideLength; sideA[1] /= sideLength; sideA[2] /= sideLength;
+  const sideB: Point3 = [
+    direction[1] * sideA[2] - direction[2] * sideA[1],
+    direction[2] * sideA[0] - direction[0] * sideA[2],
+    direction[0] * sideA[1] - direction[1] * sideA[0],
+  ];
+  const ring = (center: Point3, radius: number, index: number): Point3 => {
+    const angle = index / segments * Math.PI * 2;
+    return [
+      center[0] + (sideA[0] * Math.cos(angle) + sideB[0] * Math.sin(angle)) * radius,
+      center[1] + (sideA[1] * Math.cos(angle) + sideB[1] * Math.sin(angle)) * radius,
+      center[2] + (sideA[2] * Math.cos(angle) + sideB[2] * Math.sin(angle)) * radius,
+    ];
+  };
+  for (let i = 0; i < segments; i++) {
+    const next = (i + 1) % segments;
+    const a = ring(start, startRadius, i), b = ring(start, startRadius, next);
+    const c = ring(end, endRadius, next), d = ring(end, endRadius, i);
+    addTriangle(raw, a, b, c); addTriangle(raw, a, c, d);
+    addTriangle(raw, start, b, a); addTriangle(raw, end, d, c);
+  }
+}
+
+function addEllipsoid(raw: number[], center: Point3, radii: Point3, segments = 8, rings = 4, yaw = 0) {
+  const point = (latitude: number, longitude: number): Point3 => {
+    const y = Math.sin(latitude) * radii[1];
+    const ringRadius = Math.cos(latitude);
+    const x = Math.cos(longitude) * radii[0] * ringRadius;
+    const z = Math.sin(longitude) * radii[2] * ringRadius;
+    const cos = Math.cos(yaw), sin = Math.sin(yaw);
+    return [center[0] + x * cos + z * sin, center[1] + y, center[2] - x * sin + z * cos];
+  };
+  const top: Point3 = [center[0], center[1] + radii[1], center[2]];
+  const bottom: Point3 = [center[0], center[1] - radii[1], center[2]];
+  const latitude = (ring: number) => Math.PI / 2 - ring / rings * Math.PI;
+  for (let i = 0; i < segments; i++) {
+    const next = (i + 1) % segments;
+    addTriangle(raw, top, point(latitude(1), next / segments * Math.PI * 2), point(latitude(1), i / segments * Math.PI * 2));
+    for (let ring = 1; ring < rings - 1; ring++) {
+      const a = point(latitude(ring), i / segments * Math.PI * 2);
+      const b = point(latitude(ring), next / segments * Math.PI * 2);
+      const c = point(latitude(ring + 1), next / segments * Math.PI * 2);
+      const d = point(latitude(ring + 1), i / segments * Math.PI * 2);
+      addTriangle(raw, a, b, c); addTriangle(raw, a, c, d);
+    }
+    addTriangle(raw, bottom, point(latitude(rings - 1), i / segments * Math.PI * 2), point(latitude(rings - 1), next / segments * Math.PI * 2));
+  }
+}
+
+function addWedge(raw: number[], center: Point3, size: Point3, tilt = 0) {
+  const [cx, cy, cz] = center, [sx, sy, sz] = size, cos = Math.cos(tilt), sin = Math.sin(tilt);
+  const transform = (x: number, y: number, z: number): Point3 => [cx + x * cos - y * sin, cy + x * sin + y * cos, cz + z];
+  const vertices = [
+    transform(-sx / 2, -sy / 2, -sz / 2), transform(sx / 2, -sy / 2, -sz / 2), transform(-sx / 2, sy / 2, -sz / 2),
+    transform(-sx / 2, -sy / 2, sz / 2), transform(sx / 2, -sy / 2, sz / 2), transform(-sx / 2, sy / 2, sz / 2),
+  ];
+  const triangles = [0, 1, 2, 3, 5, 4, 0, 3, 4, 0, 4, 1, 0, 2, 5, 0, 5, 3, 1, 4, 5, 1, 5, 2];
+  for (let i = 0; i < triangles.length; i += 3) addTriangle(raw, vertices[triangles[i]], vertices[triangles[i + 1]], vertices[triangles[i + 2]]);
 }
 
 function demoGeometry(variant: string) {
-  const raw: number[] = [], wide = variant === "vehicle", prop = variant === "prop", env = variant === "env";
-  if (prop) {
-    addBox(raw,[0,0,0],[.24,2.4,.24],-.18); addBox(raw,[.45,.8,0],[1.35,.7,.18],-.48); addBox(raw,[-.23,-1.1,0],[.58,.38,.34],-.18);
-  } else if (wide) {
-    addBox(raw,[0,.15,0],[2.5,.48,1]); addBox(raw,[.15,.62,0],[1.15,.62,.82]);
-    addBox(raw,[-.82,-.43,.58],[.5,.8,.24]); addBox(raw,[.82,-.43,.58],[.5,.8,.24]); addBox(raw,[-.82,-.43,-.58],[.5,.8,.24]); addBox(raw,[.82,-.43,-.58],[.5,.8,.24]);
-  } else if (env) {
-    addBox(raw,[0,-1,0],[2.7,.28,1.5]); addBox(raw,[-.78,0,0],[.34,2,.34]); addBox(raw,[.78,0,0],[.34,2,.34]); addBox(raw,[0,.92,0],[2,.35,.5]); addBox(raw,[0,1.35,0],[1.25,.3,.45]);
+  const raw: number[] = [];
+  if (variant === "prop") {
+    addCylinder(raw, [-.38, -1.25, 0], [.12, 1.05, 0], .105, .08, 8);
+    addCylinder(raw, [-.43, -1.42, 0], [-.34, -1.12, 0], .18, .12, 8);
+    addCylinder(raw, [.04, .86, 0], [.22, 1.12, 0], .18, .15, 8);
+    addWedge(raw, [.56, .83, 0], [1.18, .78, .16], -.24);
+    addWedge(raw, [.30, .52, 0], [.64, .5, .14], .34);
+  } else if (variant === "vehicle") {
+    addCylinder(raw, [-.86, -.47, -.26], [-.86, -.47, .26], .46, .46, 10);
+    addCylinder(raw, [.90, -.47, -.26], [.90, -.47, .26], .46, .46, 10);
+    addEllipsoid(raw, [0, .02, 0], [1.16, .3, .34], 10, 3);
+    addEllipsoid(raw, [-.12, .43, 0], [.58, .3, .35], 8, 3, -.08);
+    addCylinder(raw, [.56, -.18, -.18], [.86, .28, -.18], .07, .055, 6);
+    addCylinder(raw, [.56, -.18, .18], [.86, .28, .18], .07, .055, 6);
+    addCylinder(raw, [.84, .22, 0], [.77, .76, 0], .055, .045, 6);
+    addCylinder(raw, [.52, .75, 0], [1.00, .75, 0], .045, .045, 6);
+    addWedge(raw, [-.48, .48, 0], [.72, .18, .46], 0);
+    addWedge(raw, [.98, .16, 0], [.44, .18, .5], .08);
+  } else if (variant === "env") {
+    addEllipsoid(raw, [0, -.92, 0], [1.5, .3, 1.08], 12, 3);
+    addCylinder(raw, [-.82, -.72, 0], [-.82, .75, 0], .14, .11, 8);
+    addCylinder(raw, [.82, -.72, 0], [.82, .75, 0], .14, .11, 8);
+    addCylinder(raw, [-1.08, .63, 0], [1.08, .63, 0], .13, .13, 8);
+    addCylinder(raw, [-.92, .89, 0], [.92, .89, 0], .1, .1, 8);
+    addWedge(raw, [0, 1.17, 0], [2.35, .42, .76], 0);
+    addWedge(raw, [0, 1.46, 0], [1.62, .34, .62], 0);
+    addWedge(raw, [0, -.63, .1], [1.25, .22, .92], 0);
+    addEllipsoid(raw, [-1.16, -.62, .52], [.4, .5, .34], 7, 3, .35);
+    addEllipsoid(raw, [1.12, -.68, -.42], [.46, .38, .3], 7, 3, -.2);
+  } else if (variant === "beast") {
+    addEllipsoid(raw, [0, .15, 0], [.86, .42, .38], 8, 3);
+    addEllipsoid(raw, [.74, .34, 0], [.45, .36, .34], 8, 3);
+    addWedge(raw, [1.12, .24, 0], [.58, .34, .42], 0);
+    addCylinder(raw, [-.62, .12, 0], [-1.18, .46, 0], .12, .05, 6);
+    [[-.55, -.1], [.48, -.1]].forEach(([x, z]) => {
+      addCylinder(raw, [x, -.05, z], [x, -.64, z], .13, .105, 7);
+      addEllipsoid(raw, [x, -.67, z], [.16, .15, .16], 7, 3);
+      addCylinder(raw, [x, -.74, z], [x + .08, -1.28, z], .1, .07, 7);
+      addWedge(raw, [x + .16, -1.38, z], [.48, .18, .26], 0);
+    });
+    addWedge(raw, [.62, .74, -.18], [.26, .42, .1], .22);
+    addWedge(raw, [.62, .74, .18], [.26, .42, .1], .22);
   } else {
-    addBox(raw,[0,.72,0],[.72,.72,.58]); addBox(raw,[0,-.05,0],[1.02,.92,.58]); addBox(raw,[0,-.72,0],[.78,.48,.48]);
-    addBox(raw,[-.72,.03,0],[.34,1.06,.36],.12); addBox(raw,[.72,.03,0],[.34,1.06,.36],-.12);
-    addBox(raw,[-.28,-1.22,0],[.38,1.05,.42],.035); addBox(raw,[.28,-1.22,0],[.38,1.05,.42],-.035);
-    addBox(raw,[-.28,-1.85,.08],[.48,.28,.82]); addBox(raw,[.28,-1.85,.08],[.48,.28,.82]);
-    addBox(raw,[0,.66,.38],[.34,.18,.2]); addBox(raw,[-.36,.78,.22],[.13,.13,.13]); addBox(raw,[.36,.78,.22],[.13,.13,.13]);
+    addEllipsoid(raw, [0, .92, 0], [.34, .4, .32], 8, 4);
+    addCylinder(raw, [0, .48, 0], [0, .66, 0], .15, .15, 8);
+    addCylinder(raw, [0, -.38, 0], [0, .48, 0], .38, .5, 8);
+    addCylinder(raw, [0, -.72, 0], [0, -.38, 0], .37, .34, 8);
+    [[-1, -.02], [1, .02]].forEach(([side, z]) => {
+      const shoulder: Point3 = [side * .47, .34, z];
+      const elbow: Point3 = [side * .72, -.1, z + .03];
+      const wrist: Point3 = [side * .74, -.58, z + .08];
+      addEllipsoid(raw, shoulder, [.19, .19, .2], 7, 3);
+      addCylinder(raw, shoulder, elbow, .16, .125, 7);
+      addEllipsoid(raw, elbow, [.14, .14, .15], 7, 3);
+      addCylinder(raw, elbow, wrist, .12, .09, 7);
+      addEllipsoid(raw, wrist, [.11, .16, .12], 7, 3);
+    });
+    [[-1, -.05], [1, .05]].forEach(([side, z]) => {
+      const hip: Point3 = [side * .23, -.66, z];
+      const knee: Point3 = [side * .27, -1.19, z + .02];
+      const ankle: Point3 = [side * .28, -1.68, z + .06];
+      addEllipsoid(raw, hip, [.18, .18, .19], 7, 3);
+      addCylinder(raw, hip, knee, .17, .135, 7);
+      addEllipsoid(raw, knee, [.145, .14, .15], 7, 3);
+      addCylinder(raw, knee, ankle, .13, .09, 7);
+      addWedge(raw, [side * .28, -1.79, .17], [.34, .2, .54], 0);
+    });
+    addWedge(raw, [0, 1.13, -.25], [.5, .24, .12], 0);
   }
   return finalize(raw);
 }
